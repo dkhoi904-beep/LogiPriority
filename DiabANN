@@ -1,477 +1,403 @@
-{
-  "nbformat": 4,
-  "nbformat_minor": 0,
-  "metadata": {
-    "colab": {
-      "provenance": []
-    },
-    "kernelspec": {
-      "name": "python3",
-      "display_name": "Python 3"
-    },
-    "language_info": {
-      "name": "python"
-    }
-  },
-  "cells": [
-    {
-      "cell_type": "code",
-      "source": [
-        "# =========================================================\n",
-        "# Diabetes Risk — Personalized ANN UI for Khôi (Colab)\n",
-        "# (Fixed: gr.Label nhận float thay vì string; Predict OK)\n",
-        "# =========================================================\n",
-        "# !pip -q install gradio==4.* tensorflow==2.* scikit-learn joblib\n",
-        "\n",
-        "import os, io, base64, random, json, time, joblib\n",
-        "import numpy as np\n",
-        "import pandas as pd\n",
-        "import gradio as gr\n",
-        "\n",
-        "from sklearn.model_selection import train_test_split\n",
-        "from sklearn.preprocessing import StandardScaler\n",
-        "from sklearn.metrics import accuracy_score, roc_auc_score\n",
-        "import tensorflow as tf\n",
-        "from tensorflow import keras\n",
-        "from tensorflow.keras import layers\n",
-        "\n",
-        "# ------------------ Reproducibility ------------------\n",
-        "SEED = 42\n",
-        "np.random.seed(SEED); tf.random.set_seed(SEED); random.seed(SEED)\n",
-        "os.environ[\"PYTHONHASHSEED\"] = str(SEED)\n",
-        "\n",
-        "# ------------------ Config & Constants ------------------\n",
-        "FEATURES = [\"Pregnancies\",\"Glucose\",\"SkinThickness\",\"Insulin\",\"BMI\",\n",
-        "            \"DiabetesPedigreeFunction\",\"Age\"]\n",
-        "IMPUTE_ZERO = [\"Glucose\",\"SkinThickness\",\"Insulin\",\"BMI\"]\n",
-        "TARGET = \"Outcome\"\n",
-        "\n",
-        "# Default personalization\n",
-        "DEFAULT_CONFIG = {\n",
-        "    \"user_name\": \"Khôi\",\n",
-        "    \"app_name\": \"Diabetes ANN\",\n",
-        "    \"tagline\": \"AI Risk Prediction\",\n",
-        "    \"primary\": \"#6d28d9\",   # Violet\n",
-        "    \"accent\":  \"#22c55e\",   # Green\n",
-        "    \"text\":    \"#0f172a\",\n",
-        "    \"lang\":    \"VI\",        # VI / EN\n",
-        "    \"threshold\": 0.50,\n",
-        "    \"logo_svg\": None,\n",
-        "}\n",
-        "CONFIG_PATH = \"/content/diab_ui_config.json\"\n",
-        "\n",
-        "# ------------------ Built-in SVG Logo ------------------\n",
-        "def built_in_logo_svg(primary=\"#6d28d9\", accent=\"#22c55e\", text=\"#0f172a\", rounded=True):\n",
-        "    R = 18 if rounded else 4\n",
-        "    S = 96\n",
-        "    return f\"\"\"\n",
-        "    <svg xmlns='http://www.w3.org/2000/svg' width='{S}' height='{S}' viewBox='0 0 {S} {S}'>\n",
-        "      <defs>\n",
-        "        <linearGradient id='g1' x1='0' y1='0' x2='1' y2='1'>\n",
-        "          <stop offset='0%' stop-color='{primary}'/>\n",
-        "          <stop offset='100%' stop-color='{accent}'/>\n",
-        "        </linearGradient>\n",
-        "        <filter id='soft' x='-20%' y='-20%' width='140%' height='140%'>\n",
-        "          <feGaussianBlur in='SourceGraphic' stdDeviation='0.6'/>\n",
-        "        </filter>\n",
-        "      </defs>\n",
-        "      <rect x='2' y='2' rx='{R}' ry='{R}' width='{S-4}' height='{S-4}' fill='url(#g1)' opacity='0.10'/>\n",
-        "      <path d='M48 16 C38 30, 28 42, 28 54 a20 20 0 0 0 40 0 c0-12-10-24-20-38z' fill='url(#g1)' stroke='{primary}' stroke-width='2'/>\n",
-        "      <circle cx='42' cy='48' r='3.2' fill='#ffffff' stroke='{accent}' stroke-width='1.6'/>\n",
-        "      <circle cx='56' cy='56' r='3.2' fill='#ffffff' stroke='{accent}' stroke-width='1.6'/>\n",
-        "      <circle cx='54' cy='40' r='3.2' fill='#ffffff' stroke='{accent}' stroke-width='1.6'/>\n",
-        "      <line x1='42' y1='48' x2='56' y2='56' stroke='#ffffff' stroke-width='1.6' opacity='0.9'/>\n",
-        "      <line x1='42' y1='48' x2='54' y2='40' stroke='#ffffff' stroke-width='1.6' opacity='0.9'/>\n",
-        "      <line x1='54' y1='40' x2='56' y2='56' stroke='#ffffff' stroke-width='1.6' opacity='0.9'/>\n",
-        "      <ellipse cx='44' cy='34' rx='10' ry='4' fill='#ffffff' opacity='0.18' filter='url(#soft)'/>\n",
-        "    </svg>\n",
-        "    \"\"\"\n",
-        "\n",
-        "CONSULTING_VI = \"\"\"\n",
-        "**Khuyến nghị (tham khảo, không thay thế tư vấn y khoa):**\n",
-        "- Cân đối **carb–protein–fat**; ưu tiên rau, trái cây, ngũ cốc nguyên hạt; hạn chế đồ uống có đường.\n",
-        "- **Vận động** đều đặn; duy trì **cân nặng hợp lý**.\n",
-        "- Theo dõi đường huyết theo chỉ định; có dấu hiệu bất thường hãy **liên hệ bác sĩ/chuyên gia dinh dưỡng**.\n",
-        "\"\"\"\n",
-        "CONSULTING_EN = \"\"\"\n",
-        "**Consulting (for reference; does not replace medical advice):**\n",
-        "- Balance **carbs–protein–fat**; prioritize vegetables, fruits, whole grains; limit sugary drinks.\n",
-        "- **Exercise** regularly; maintain a **healthy weight**.\n",
-        "- Monitor blood glucose as advised; contact a **doctor/dietitian** if any abnormal signs appear.\n",
-        "\"\"\"\n",
-        "\n",
-        "# ------------------ Load + Clean Data ------------------\n",
-        "def load_initial_df():\n",
-        "    local = \"/content/diabetes.csv\"\n",
-        "    if os.path.exists(local):\n",
-        "        df = pd.read_csv(local)\n",
-        "    else:\n",
-        "        url = \"https://raw.githubusercontent.com/plotly/datasets/master/diabetes.csv\"\n",
-        "        df = pd.read_csv(url)\n",
-        "    df.columns = [c.strip() for c in df.columns]\n",
-        "    for c in IMPUTE_ZERO:\n",
-        "        if c in df.columns:\n",
-        "            df[c] = df[c].replace(0, np.nan).fillna(df[c].median())\n",
-        "    return df\n",
-        "\n",
-        "def split_xy(df, need_target=True):\n",
-        "    miss = [c for c in FEATURES if c not in df.columns]\n",
-        "    if miss:\n",
-        "        raise ValueError(f\"Thiếu cột: {miss}. Yêu cầu cột: {FEATURES}\")\n",
-        "    X = df[FEATURES].astype(np.float32).values\n",
-        "    y = None\n",
-        "    if need_target:\n",
-        "        if TARGET not in df.columns:\n",
-        "            raise ValueError(\"CSV huấn luyện cần cột 'Outcome' (0/1)\")\n",
-        "        y = df[TARGET].astype(np.float32).values\n",
-        "    return X, y\n",
-        "\n",
-        "# ------------------ Build & Train ANN ------------------\n",
-        "def build_ann(input_dim: int):\n",
-        "    model = keras.Sequential([\n",
-        "        layers.Dense(32, activation='relu', input_shape=(input_dim,)),\n",
-        "        layers.Dropout(0.15),\n",
-        "        layers.Dense(16, activation='relu'),\n",
-        "        layers.Dense(1, activation='sigmoid')\n",
-        "    ])\n",
-        "    model.compile(optimizer='adam',\n",
-        "                  loss='binary_crossentropy',\n",
-        "                  metrics=[keras.metrics.AUC(name='auc'),\n",
-        "                           keras.metrics.BinaryAccuracy(name='acc')])\n",
-        "    return model\n",
-        "\n",
-        "# Initialize model on startup\n",
-        "scaler = StandardScaler()\n",
-        "model  = build_ann(len(FEATURES))\n",
-        "\n",
-        "_base_df = load_initial_df()\n",
-        "X_all, y_all = split_xy(_base_df, need_target=True)\n",
-        "X_tr, X_te, y_tr, y_te = train_test_split(X_all, y_all, test_size=0.2,\n",
-        "                                          random_state=SEED, stratify=y_all)\n",
-        "X_tr = scaler.fit_transform(X_tr)\n",
-        "X_te = scaler.transform(X_te)\n",
-        "es = keras.callbacks.EarlyStopping(monitor='val_auc', mode='max',\n",
-        "                                   patience=20, restore_best_weights=True, verbose=0)\n",
-        "model.fit(X_tr, y_tr, epochs=250, batch_size=32,\n",
-        "          validation_split=0.2, callbacks=[es], verbose=0)\n",
-        "y_prob = model.predict(X_te, verbose=0).ravel()\n",
-        "ACC = accuracy_score(y_te, (y_prob >= 0.5).astype(int))\n",
-        "AUC = roc_auc_score(y_te, y_prob)\n",
-        "\n",
-        "# ------------------ Personalization helpers ------------------\n",
-        "def load_config():\n",
-        "    if os.path.exists(CONFIG_PATH):\n",
-        "        try:\n",
-        "            return json.load(open(CONFIG_PATH, \"r\"))\n",
-        "        except Exception:\n",
-        "            pass\n",
-        "    cfg = DEFAULT_CONFIG.copy()\n",
-        "    cfg[\"logo_svg\"] = built_in_logo_svg(cfg[\"primary\"], cfg[\"accent\"], cfg[\"text\"])\n",
-        "    return cfg\n",
-        "\n",
-        "def save_config(cfg):\n",
-        "    json.dump(cfg, open(CONFIG_PATH, \"w\"))\n",
-        "\n",
-        "def header_html(cfg, acc, auc):\n",
-        "    logo = cfg[\"logo_svg\"] or built_in_logo_svg(cfg[\"primary\"], cfg[\"accent\"], cfg[\"text\"])\n",
-        "    return f\"\"\"\n",
-        "    <div style=\"\n",
-        "        background: linear-gradient(135deg, {cfg['primary']}, {cfg['accent']});\n",
-        "        color:white; padding:20px; border-radius:18px; box-shadow:0 10px 30px rgba(0,0,0,.15);\">\n",
-        "      <div style=\"display:flex; gap:16px; align-items:center;\">\n",
-        "        <div>{logo}</div>\n",
-        "        <div>\n",
-        "          <div style=\"font-weight:900; font-size:28px; line-height:1;\">{cfg['app_name']}</div>\n",
-        "          <div style=\"opacity:.95; margin-top:4px; font-weight:600;\">{cfg['tagline']} — Hello, {cfg['user_name']}!</div>\n",
-        "          <div style=\"margin-top:10px; display:flex; gap:10px;\">\n",
-        "            <div style=\"background:#ffffff20; padding:6px 10px; border-radius:10px;\">Accuracy: <b>{acc:.3f}</b></div>\n",
-        "            <div style=\"background:#ffffff20; padding:6px 10px; border-radius:10px;\">AUC: <b>{auc:.3f}</b></div>\n",
-        "            <div style=\"background:#ffffff20; padding:6px 10px; border-radius:10px;\">ANN: Dense(32→16→1)</div>\n",
-        "          </div>\n",
-        "        </div>\n",
-        "      </div>\n",
-        "    </div>\n",
-        "    \"\"\"\n",
-        "\n",
-        "def risk_gauge_html(p, primary, accent):\n",
-        "    p = float(np.clip(p, 0, 1))\n",
-        "    deg = int(p * 360)\n",
-        "    color = \"#22c55e\" if p < .33 else (\"#f59e0b\" if p < .66 else \"#ef4444\")\n",
-        "    return f\"\"\"\n",
-        "    <div style=\"display:flex;justify-content:center;\">\n",
-        "      <div style=\"width:170px;height:170px;border-radius:50%;\n",
-        "                  background: conic-gradient({color} {deg}deg, #e5e7eb {deg}deg 360deg);\n",
-        "                  display:flex;align-items:center;justify-content:center;\">\n",
-        "        <div style=\"width:128px;height:128px;border-radius:50%;background:white;\n",
-        "                    display:flex;align-items:center;justify-content:center;\n",
-        "                    font-weight:800;font-size:26px;color:#111827;\">\n",
-        "          {p*100:.1f}%\n",
-        "        </div>\n",
-        "      </div>\n",
-        "    </div>\n",
-        "    \"\"\"\n",
-        "\n",
-        "def verdict_badge(prob, thresh):\n",
-        "    at_risk = prob >= thresh\n",
-        "    text = \"At risk for diabetes\" if at_risk else \"Not at risk for diabetes\"\n",
-        "    bg = \"#fee2e2\" if at_risk else \"#dcfce7\"\n",
-        "    fg = \"#b91c1c\" if at_risk else \"#065f46\"\n",
-        "    return f\"<div style='display:inline-block;padding:.45rem .8rem;border-radius:999px;background:{bg};color:{fg};font-weight:800'>{text}</div>\"\n",
-        "\n",
-        "# ------------------ App Logic ------------------\n",
-        "CFG = load_config()\n",
-        "\n",
-        "# >>> FIXED predict_one: Label nhận FLOAT (dict {label: float}), DataFrame dùng gr.update\n",
-        "def predict_one(preg, glu, skin, ins, bmi, dpf, age, thresh, hist):\n",
-        "    row = np.array([[preg, glu, skin, ins, bmi, dpf, age]], dtype=np.float32)\n",
-        "    row = scaler.transform(row)\n",
-        "    p = float(model.predict(row, verbose=0)[0,0])   # float\n",
-        "\n",
-        "    lang = CFG[\"lang\"]\n",
-        "    consult = (CONSULTING_VI if lang==\"VI\" else CONSULTING_EN)\n",
-        "    gauge = risk_gauge_html(p, CFG[\"primary\"], CFG[\"accent\"])\n",
-        "    badge = verdict_badge(p, thresh)\n",
-        "\n",
-        "    record = {\"time\": time.strftime(\"%Y-%m-%d %H:%M:%S\"),\n",
-        "              \"Pregnancies\":preg, \"Glucose\":glu, \"SkinThickness\":skin,\n",
-        "              \"Insulin\":ins, \"BMI\":bmi, \"DPF\":dpf, \"Age\":age,\n",
-        "              \"prob\":round(p,3), \"label\":\"At risk\" if p>=thresh else \"Not at risk\"}\n",
-        "    hist = (hist or []) + [record]\n",
-        "    hist_df = pd.DataFrame(hist)\n",
-        "\n",
-        "    return (\n",
-        "        gauge,\n",
-        "        {\"Risk probability\": round(p, 3)},  # <-- float\n",
-        "        badge,\n",
-        "        consult,\n",
-        "        hist,\n",
-        "        gr.update(value=hist_df, visible=True)\n",
-        "    )\n",
-        "\n",
-        "def retrain_from_csv(file, append_default):\n",
-        "    global model, scaler, ACC, AUC, _base_df\n",
-        "    if file is None:\n",
-        "        return \"Chưa chọn CSV.\", f\"Accuracy ~ {ACC:.3f} | AUC ~ {AUC:.3f}\"\n",
-        "    df_u = pd.read_csv(file.name)\n",
-        "    df_u.columns = [c.strip() for c in df_u.columns]\n",
-        "    for c in IMPUTE_ZERO:\n",
-        "        if c in df_u.columns:\n",
-        "            df_u[c] = df_u[c].replace(0, np.nan).fillna(df_u[c].median())\n",
-        "    df_all = pd.concat([_base_df, df_u], ignore_index=True) if append_default else df_u.copy()\n",
-        "    X, y = split_xy(df_all, need_target=True)\n",
-        "    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2,\n",
-        "                                              random_state=SEED, stratify=y)\n",
-        "    scaler = StandardScaler()\n",
-        "    X_tr = scaler.fit_transform(X_tr)\n",
-        "    X_te = scaler.transform(X_te)\n",
-        "    model = build_ann(len(FEATURES))\n",
-        "    es = keras.callbacks.EarlyStopping(monitor='val_auc', mode='max',\n",
-        "                                       patience=20, restore_best_weights=True, verbose=0)\n",
-        "    model.fit(X_tr, y_tr, epochs=250, batch_size=32,\n",
-        "              validation_split=0.2, callbacks=[es], verbose=0)\n",
-        "    y_prob = model.predict(X_te, verbose=0).ravel()\n",
-        "    ACC = accuracy_score(y_te, (y_prob >= 0.5).astype(int))\n",
-        "    AUC = roc_auc_score(y_te, y_prob)\n",
-        "    return \"Retrain hoàn tất.\", f\"Accuracy ~ {ACC:.3f} | AUC ~ {AUC:.3f}\"\n",
-        "\n",
-        "def batch_predict_csv(file, thresh):\n",
-        "    if file is None:\n",
-        "        return None, gr.update(visible=False), \"Chưa chọn CSV.\"\n",
-        "    df = pd.read_csv(file.name)\n",
-        "    df.columns = [c.strip() for c in df.columns]\n",
-        "    for c in IMPUTE_ZERO:\n",
-        "        if c in df.columns:\n",
-        "            df[c] = df[c].replace(0, np.nan).fillna(df[c].median())\n",
-        "    X, _ = split_xy(df, need_target=False)\n",
-        "    Xn = scaler.transform(X)\n",
-        "    p = model.predict(Xn, verbose=0).ravel()\n",
-        "    out = df.copy()\n",
-        "    out[\"risk_probability\"] = np.round(p, 3)\n",
-        "    out[\"label\"] = np.where(out[\"risk_probability\"] >= thresh, \"At risk\", \"Not at risk\")\n",
-        "    out_path = \"/content/diabetes_predictions.csv\"\n",
-        "    out.to_csv(out_path, index=False)\n",
-        "    return out_path, gr.update(visible=True, value=out.head(12)), \"Đã tạo file dự đoán.\"\n",
-        "\n",
-        "def export_artifacts():\n",
-        "    keras.models.save_model(model, \"/content/diabetes_ann.h5\")\n",
-        "    joblib.dump(scaler, \"/content/scaler.pkl\")\n",
-        "    return \"/content/diabetes_ann.h5\", \"/content/scaler.pkl\", \"Đã lưu model & scaler.\"\n",
-        "\n",
-        "def download_history(hist):\n",
-        "    if not hist:\n",
-        "        return None, \"Chưa có lịch sử.\"\n",
-        "    df = pd.DataFrame(hist)\n",
-        "    path = \"/content/prediction_history.csv\"\n",
-        "    df.to_csv(path, index=False)\n",
-        "    return path, \"Đã xuất lịch sử.\"\n",
-        "\n",
-        "def update_personalization(name, app_name, tagline, primary, accent, text, lang, default_thresh, logo_file):\n",
-        "    CFG[\"user_name\"] = name or CFG[\"user_name\"]\n",
-        "    CFG[\"app_name\"]  = app_name or CFG[\"app_name\"]\n",
-        "    CFG[\"tagline\"]   = tagline or CFG[\"tagline\"]\n",
-        "    CFG[\"primary\"]   = primary or CFG[\"primary\"]\n",
-        "    CFG[\"accent\"]    = accent or CFG[\"accent\"]\n",
-        "    CFG[\"text\"]      = text or CFG[\"text\"]\n",
-        "    CFG[\"lang\"]      = lang\n",
-        "    CFG[\"threshold\"] = float(default_thresh)\n",
-        "    if logo_file is not None:\n",
-        "        data = open(logo_file.name, \"rb\").read()\n",
-        "        b64 = base64.b64encode(data).decode(\"utf-8\")\n",
-        "        CFG[\"logo_svg\"] = f\"<img src='data:image/png;base64,{b64}' style='width:96px;height:96px;border-radius:20px'/>\"\n",
-        "    elif CFG.get(\"logo_svg\") is None:\n",
-        "        CFG[\"logo_svg\"] = built_in_logo_svg(CFG[\"primary\"], CFG[\"accent\"], CFG[\"text\"])\n",
-        "    save_config(CFG)\n",
-        "    hdr = header_html(CFG, ACC, AUC)\n",
-        "    return hdr, f\"Đã lưu cá nhân hoá. Ngưỡng mặc định: {CFG['threshold']:.2f} · Ngôn ngữ: {CFG['lang']}\"\n",
-        "\n",
-        "# ------------------ THEME & CSS ------------------\n",
-        "CSS = \"\"\"\n",
-        ".gradio-container { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }\n",
-        ".card { background:#fff; border-radius:16px; padding:16px; border:1px solid #eef1f5; box-shadow:0 8px 24px rgba(0,0,0,.06); }\n",
-        "\"\"\"\n",
-        "\n",
-        "THEME = gr.themes.Soft(primary_hue=\"violet\", secondary_hue=\"green\").set(body_background_fill=\"#fafbff\")\n",
-        "\n",
-        "# ------------------ BUILD UI ------------------\n",
-        "with gr.Blocks(title=\"Diabetes ANN — Personalized UI\", theme=THEME, css=CSS) as demo:\n",
-        "    cfg_state  = gr.State(CFG)\n",
-        "    hist_state = gr.State([])\n",
-        "\n",
-        "    header = gr.HTML(header_html(CFG, ACC, AUC))\n",
-        "\n",
-        "    with gr.Tab(\"🔮 Predict\"):\n",
-        "        with gr.Row():\n",
-        "            with gr.Column(scale=1, min_width=380):\n",
-        "                pregnancies = gr.Slider(0, 17, 3, step=1, label=\"Pregnancies\")\n",
-        "                glucose     = gr.Slider(50, 200, 120, step=1, label=\"Glucose\")\n",
-        "                skin        = gr.Slider(0, 100, 23, step=1, label=\"SkinThickness\")\n",
-        "                insulin     = gr.Slider(0, 900, 100, step=1, label=\"Insulin\")\n",
-        "                bmi         = gr.Slider(10.0, 70.0, 28.0, step=0.1, label=\"BMI\")\n",
-        "                dpf         = gr.Slider(0.05, 2.5, 0.47, step=0.01, label=\"Diabetes Pedigree Function\")\n",
-        "                age         = gr.Slider(18, 90, 35, step=1, label=\"Age\")\n",
-        "                thresh      = gr.Slider(0.10, 0.90, CFG[\"threshold\"], step=0.01, label=\"Decision threshold\")\n",
-        "                btn_predict = gr.Button(\"Predict\", variant=\"primary\")\n",
-        "            with gr.Column(scale=1, min_width=380):\n",
-        "                gauge_html  = gr.HTML()\n",
-        "                prob_label  = gr.Label(label=\"Risk probability\", num_top_classes=1)\n",
-        "                verdict     = gr.HTML()\n",
-        "                consult_md  = gr.Markdown()\n",
-        "        with gr.Accordion(\"Prediction history\", open=False):\n",
-        "            hist_df = gr.Dataframe(visible=False)\n",
-        "            btn_hist = gr.Button(\"Export history CSV\")\n",
-        "            hist_file = gr.File()\n",
-        "            hist_msg  = gr.Markdown()\n",
-        "            btn_hist.click(download_history, inputs=[hist_state], outputs=[hist_file, hist_msg])\n",
-        "\n",
-        "        btn_predict.click(\n",
-        "            predict_one,\n",
-        "            inputs=[pregnancies, glucose, skin, insulin, bmi, dpf, age, thresh, hist_state],\n",
-        "            outputs=[gauge_html, prob_label, verdict, consult_md, hist_state, hist_df]\n",
-        "        )\n",
-        "\n",
-        "    with gr.Tab(\"📦 Batch Predict CSV\"):\n",
-        "        csv_pred = gr.File(label=\"CSV (7 FEATURES, không cần Outcome)\", file_types=[\".csv\"])\n",
-        "        thresh2  = gr.Slider(0.10, 0.90, CFG[\"threshold\"], step=0.01, label=\"Decision threshold\")\n",
-        "        run_pred = gr.Button(\"Run batch prediction\")\n",
-        "        file_out = gr.File(label=\"Tải CSV kết quả\", visible=False)\n",
-        "        head_df  = gr.Dataframe(label=\"Xem nhanh 12 dòng đầu\", visible=False)\n",
-        "        msg2     = gr.Markdown()\n",
-        "        run_pred.click(batch_predict_csv, inputs=[csv_pred, thresh2],\n",
-        "                       outputs=[file_out, head_df, msg2])\n",
-        "\n",
-        "    with gr.Tab(\"🧪 Data & Retrain ANN\"):\n",
-        "        gr.Markdown(\"Upload CSV để huấn luyện lại (7 FEATURES + `Outcome`=0/1). Có thể **Append** với dataset mặc định.\")\n",
-        "        csv_train = gr.File(label=\"Training CSV\", file_types=[\".csv\"])\n",
-        "        append_ck = gr.Checkbox(value=True, label=\"Append với dataset mặc định\")\n",
-        "        run_train = gr.Button(\"Train / Retrain\", variant=\"primary\")\n",
-        "        msg3      = gr.Markdown()\n",
-        "        metrics   = gr.Markdown(f\"Accuracy ~ {ACC:.3f} | AUC ~ {AUC:.3f}\")\n",
-        "        run_train.click(retrain_from_csv, inputs=[csv_train, append_ck], outputs=[msg3, metrics])\n",
-        "\n",
-        "    with gr.Tab(\"🎨 Personalization\"):\n",
-        "        with gr.Row():\n",
-        "            with gr.Column(scale=1):\n",
-        "                name_in   = gr.Textbox(value=CFG[\"user_name\"], label=\"Tên hiển thị\")\n",
-        "                app_in    = gr.Textbox(value=CFG[\"app_name\"], label=\"App name\")\n",
-        "                tag_in    = gr.Textbox(value=CFG[\"tagline\"], label=\"Tagline\")\n",
-        "                primary   = gr.ColorPicker(value=CFG[\"primary\"], label=\"Primary color\")\n",
-        "                accent    = gr.ColorPicker(value=CFG[\"accent\"], label=\"Accent color\")\n",
-        "                textcol   = gr.ColorPicker(value=CFG[\"text\"], label=\"Text color\")\n",
-        "                lang_dd   = gr.Dropdown(choices=[\"VI\",\"EN\"], value=CFG[\"lang\"], label=\"Language\")\n",
-        "                th_in     = gr.Slider(0.10, 0.90, CFG[\"threshold\"], step=0.01, label=\"Default threshold\")\n",
-        "                logo_up   = gr.File(label=\"Tải logo PNG/SVG (tuỳ chọn)\", file_types=[\".png\",\".svg\"])\n",
-        "                save_btn  = gr.Button(\"Lưu cá nhân hoá\", variant=\"primary\")\n",
-        "            with gr.Column(scale=1):\n",
-        "                preview = gr.HTML(header_html(CFG, ACC, AUC))\n",
-        "                save_msg = gr.Markdown()\n",
-        "        save_btn.click(update_personalization,\n",
-        "                       inputs=[name_in, app_in, tag_in, primary, accent, textcol, lang_dd, th_in, logo_up],\n",
-        "                       outputs=[header, save_msg])\n",
-        "\n",
-        "    with gr.Tab(\"💾 Export\"):\n",
-        "        save_model_btn = gr.Button(\"Export model & scaler\")\n",
-        "        f_model  = gr.File(label=\"diabetes_ann.h5\", interactive=False)\n",
-        "        f_scaler = gr.File(label=\"scaler.pkl\", interactive=False)\n",
-        "        save_msg2 = gr.Markdown()\n",
-        "        save_model_btn.click(export_artifacts, outputs=[f_model, f_scaler, save_msg2])\n",
-        "\n",
-        "    gr.Markdown(\"---\\n*Hướng dẫn nhanh:* Tab **Personalization** để tuỳ biến màu/threshold/ngôn ngữ & logo. \"\n",
-        "                \"Tab **Batch Predict** để dự đoán file CSV hàng loạt. \"\n",
-        "                \"Tab **Data & Retrain ANN** để huấn luyện lại trên dữ liệu của bạn.\")\n",
-        "\n",
-        "demo.launch()"
-      ],
-      "metadata": {
-        "colab": {
-          "base_uri": "https://localhost:8080/",
-          "height": 677
-        },
-        "id": "H56MIPMz9Lxf",
-        "outputId": "bea85736-8c47-443f-91a6-cb66750734c5"
-      },
-      "execution_count": 2,
-      "outputs": [
-        {
-          "output_type": "stream",
-          "name": "stderr",
-          "text": [
-            "/usr/local/lib/python3.12/dist-packages/keras/src/layers/core/dense.py:93: UserWarning: Do not pass an `input_shape`/`input_dim` argument to a layer. When using Sequential models, prefer using an `Input(shape)` object as the first layer in the model instead.\n",
-            "  super().__init__(activity_regularizer=activity_regularizer, **kwargs)\n"
-          ]
-        },
-        {
-          "output_type": "stream",
-          "name": "stdout",
-          "text": [
-            "It looks like you are running Gradio on a hosted Jupyter notebook, which requires `share=True`. Automatically setting `share=True` (you can turn this off by setting `share=False` in `launch()` explicitly).\n",
-            "\n",
-            "Colab notebook detected. To show errors in colab notebook, set debug=True in launch()\n",
-            "* Running on public URL: https://c0cf2f6b37c8a99f5b.gradio.live\n",
-            "\n",
-            "This share link expires in 1 week. For free permanent hosting and GPU upgrades, run `gradio deploy` from the terminal in the working directory to deploy to Hugging Face Spaces (https://huggingface.co/spaces)\n"
-          ]
-        },
-        {
-          "output_type": "display_data",
-          "data": {
-            "text/plain": [
-              "<IPython.core.display.HTML object>"
-            ],
-            "text/html": [
-              "<div><iframe src=\"https://c0cf2f6b37c8a99f5b.gradio.live\" width=\"100%\" height=\"500\" allow=\"autoplay; camera; microphone; clipboard-read; clipboard-write;\" frameborder=\"0\" allowfullscreen></iframe></div>"
-            ]
-          },
-          "metadata": {}
-        },
-        {
-          "output_type": "execute_result",
-          "data": {
-            "text/plain": []
-          },
-          "metadata": {},
-          "execution_count": 2
-        }
-      ]
-    }
-  ]
+# =========================================================
+# Diabetes Risk — Personalized ANN UI for Khôi (Colab)
+# (Fixed: gr.Label nhận float thay vì string; Predict OK)
+# =========================================================
+# !pip -q install gradio==4.* tensorflow==2.* scikit-learn joblib
+
+import os, io, base64, random, json, time, joblib
+import numpy as np
+import pandas as pd
+import gradio as gr
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, roc_auc_score
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+
+# ------------------ Reproducibility ------------------
+SEED = 42
+np.random.seed(SEED); tf.random.set_seed(SEED); random.seed(SEED)
+os.environ["PYTHONHASHSEED"] = str(SEED)
+
+# ------------------ Config & Constants ------------------
+FEATURES = ["Pregnancies","Glucose","SkinThickness","Insulin","BMI",
+            "DiabetesPedigreeFunction","Age"]
+IMPUTE_ZERO = ["Glucose","SkinThickness","Insulin","BMI"]
+TARGET = "Outcome"
+
+# Default personalization
+DEFAULT_CONFIG = {
+    "user_name": "Khôi",
+    "app_name": "Diabetes ANN",
+    "tagline": "AI Risk Prediction",
+    "primary": "#6d28d9",   # Violet
+    "accent":  "#22c55e",   # Green
+    "text":    "#0f172a",
+    "lang":    "VI",        # VI / EN
+    "threshold": 0.50,
+    "logo_svg": None,
 }
+CONFIG_PATH = "/content/diab_ui_config.json"
+
+# ------------------ Built-in SVG Logo ------------------
+def built_in_logo_svg(primary="#6d28d9", accent="#22c55e", text="#0f172a", rounded=True):
+    R = 18 if rounded else 4
+    S = 96
+    return f"""
+    <svg xmlns='http://www.w3.org/2000/svg' width='{S}' height='{S}' viewBox='0 0 {S} {S}'>
+      <defs>
+        <linearGradient id='g1' x1='0' y1='0' x2='1' y2='1'>
+          <stop offset='0%' stop-color='{primary}'/>
+          <stop offset='100%' stop-color='{accent}'/>
+        </linearGradient>
+        <filter id='soft' x='-20%' y='-20%' width='140%' height='140%'>
+          <feGaussianBlur in='SourceGraphic' stdDeviation='0.6'/>
+        </filter>
+      </defs>
+      <rect x='2' y='2' rx='{R}' ry='{R}' width='{S-4}' height='{S-4}' fill='url(#g1)' opacity='0.10'/>
+      <path d='M48 16 C38 30, 28 42, 28 54 a20 20 0 0 0 40 0 c0-12-10-24-20-38z' fill='url(#g1)' stroke='{primary}' stroke-width='2'/>
+      <circle cx='42' cy='48' r='3.2' fill='#ffffff' stroke='{accent}' stroke-width='1.6'/>
+      <circle cx='56' cy='56' r='3.2' fill='#ffffff' stroke='{accent}' stroke-width='1.6'/>
+      <circle cx='54' cy='40' r='3.2' fill='#ffffff' stroke='{accent}' stroke-width='1.6'/>
+      <line x1='42' y1='48' x2='56' y2='56' stroke='#ffffff' stroke-width='1.6' opacity='0.9'/>
+      <line x1='42' y1='48' x2='54' y2='40' stroke='#ffffff' stroke-width='1.6' opacity='0.9'/>
+      <line x1='54' y1='40' x2='56' y2='56' stroke='#ffffff' stroke-width='1.6' opacity='0.9'/>
+      <ellipse cx='44' cy='34' rx='10' ry='4' fill='#ffffff' opacity='0.18' filter='url(#soft)'/>
+    </svg>
+    """
+
+CONSULTING_VI = """
+**Khuyến nghị (tham khảo, không thay thế tư vấn y khoa):**
+- Cân đối **carb–protein–fat**; ưu tiên rau, trái cây, ngũ cốc nguyên hạt; hạn chế đồ uống có đường.
+- **Vận động** đều đặn; duy trì **cân nặng hợp lý**.
+- Theo dõi đường huyết theo chỉ định; có dấu hiệu bất thường hãy **liên hệ bác sĩ/chuyên gia dinh dưỡng**.
+"""
+CONSULTING_EN = """
+**Consulting (for reference; does not replace medical advice):**
+- Balance **carbs–protein–fat**; prioritize vegetables, fruits, whole grains; limit sugary drinks.
+- **Exercise** regularly; maintain a **healthy weight**.
+- Monitor blood glucose as advised; contact a **doctor/dietitian** if any abnormal signs appear.
+"""
+
+# ------------------ Load + Clean Data ------------------
+def load_initial_df():
+    local = "/content/diabetes.csv"
+    if os.path.exists(local):
+        df = pd.read_csv(local)
+    else:
+        url = "https://raw.githubusercontent.com/plotly/datasets/master/diabetes.csv"
+        df = pd.read_csv(url)
+    df.columns = [c.strip() for c in df.columns]
+    for c in IMPUTE_ZERO:
+        if c in df.columns:
+            df[c] = df[c].replace(0, np.nan).fillna(df[c].median())
+    return df
+
+def split_xy(df, need_target=True):
+    miss = [c for c in FEATURES if c not in df.columns]
+    if miss:
+        raise ValueError(f"Thiếu cột: {miss}. Yêu cầu cột: {FEATURES}")
+    X = df[FEATURES].astype(np.float32).values
+    y = None
+    if need_target:
+        if TARGET not in df.columns:
+            raise ValueError("CSV huấn luyện cần cột 'Outcome' (0/1)")
+        y = df[TARGET].astype(np.float32).values
+    return X, y
+
+# ------------------ Build & Train ANN ------------------
+def build_ann(input_dim: int):
+    model = keras.Sequential([
+        layers.Dense(32, activation='relu', input_shape=(input_dim,)),
+        layers.Dropout(0.15),
+        layers.Dense(16, activation='relu'),
+        layers.Dense(1, activation='sigmoid')
+    ])
+    model.compile(optimizer='adam',
+                  loss='binary_crossentropy',
+                  metrics=[keras.metrics.AUC(name='auc'),
+                           keras.metrics.BinaryAccuracy(name='acc')])
+    return model
+
+# Initialize model on startup
+scaler = StandardScaler()
+model  = build_ann(len(FEATURES))
+
+_base_df = load_initial_df()
+X_all, y_all = split_xy(_base_df, need_target=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X_all, y_all, test_size=0.2,
+                                          random_state=SEED, stratify=y_all)
+X_tr = scaler.fit_transform(X_tr)
+X_te = scaler.transform(X_te)
+es = keras.callbacks.EarlyStopping(monitor='val_auc', mode='max',
+                                   patience=20, restore_best_weights=True, verbose=0)
+model.fit(X_tr, y_tr, epochs=250, batch_size=32,
+          validation_split=0.2, callbacks=[es], verbose=0)
+y_prob = model.predict(X_te, verbose=0).ravel()
+ACC = accuracy_score(y_te, (y_prob >= 0.5).astype(int))
+AUC = roc_auc_score(y_te, y_prob)
+
+# ------------------ Personalization helpers ------------------
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            return json.load(open(CONFIG_PATH, "r"))
+        except Exception:
+            pass
+    cfg = DEFAULT_CONFIG.copy()
+    cfg["logo_svg"] = built_in_logo_svg(cfg["primary"], cfg["accent"], cfg["text"])
+    return cfg
+
+def save_config(cfg):
+    json.dump(cfg, open(CONFIG_PATH, "w"))
+
+def header_html(cfg, acc, auc):
+    logo = cfg["logo_svg"] or built_in_logo_svg(cfg["primary"], cfg["accent"], cfg["text"])
+    return f"""
+    <div style="
+        background: linear-gradient(135deg, {cfg['primary']}, {cfg['accent']});
+        color:white; padding:20px; border-radius:18px; box-shadow:0 10px 30px rgba(0,0,0,.15);">
+      <div style="display:flex; gap:16px; align-items:center;">
+        <div>{logo}</div>
+        <div>
+          <div style="font-weight:900; font-size:28px; line-height:1;">{cfg['app_name']}</div>
+          <div style="opacity:.95; margin-top:4px; font-weight:600;">{cfg['tagline']} — Hello, {cfg['user_name']}!</div>
+          <div style="margin-top:10px; display:flex; gap:10px;">
+            <div style="background:#ffffff20; padding:6px 10px; border-radius:10px;">Accuracy: <b>{acc:.3f}</b></div>
+            <div style="background:#ffffff20; padding:6px 10px; border-radius:10px;">AUC: <b>{auc:.3f}</b></div>
+            <div style="background:#ffffff20; padding:6px 10px; border-radius:10px;">ANN: Dense(32→16→1)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+
+def risk_gauge_html(p, primary, accent):
+    p = float(np.clip(p, 0, 1))
+    deg = int(p * 360)
+    color = "#22c55e" if p < .33 else ("#f59e0b" if p < .66 else "#ef4444")
+    return f"""
+    <div style="display:flex;justify-content:center;">
+      <div style="width:170px;height:170px;border-radius:50%;
+                  background: conic-gradient({color} {deg}deg, #e5e7eb {deg}deg 360deg);
+                  display:flex;align-items:center;justify-content:center;">
+        <div style="width:128px;height:128px;border-radius:50%;background:white;
+                    display:flex;align-items:center;justify-content:center;
+                    font-weight:800;font-size:26px;color:#111827;">
+          {p*100:.1f}%
+        </div>
+      </div>
+    </div>
+    """
+
+def verdict_badge(prob, thresh):
+    at_risk = prob >= thresh
+    text = "At risk for diabetes" if at_risk else "Not at risk for diabetes"
+    bg = "#fee2e2" if at_risk else "#dcfce7"
+    fg = "#b91c1c" if at_risk else "#065f46"
+    return f"<div style='display:inline-block;padding:.45rem .8rem;border-radius:999px;background:{bg};color:{fg};font-weight:800'>{text}</div>"
+
+# ------------------ App Logic ------------------
+CFG = load_config()
+
+# >>> FIXED predict_one: Label nhận FLOAT (dict {label: float}), DataFrame dùng gr.update
+def predict_one(preg, glu, skin, ins, bmi, dpf, age, thresh, hist):
+    row = np.array([[preg, glu, skin, ins, bmi, dpf, age]], dtype=np.float32)
+    row = scaler.transform(row)
+    p = float(model.predict(row, verbose=0)[0,0])   # float
+
+    lang = CFG["lang"]
+    consult = (CONSULTING_VI if lang=="VI" else CONSULTING_EN)
+    gauge = risk_gauge_html(p, CFG["primary"], CFG["accent"])
+    badge = verdict_badge(p, thresh)
+
+    record = {"time": time.strftime("%Y-%m-%d %H:%M:%S"),
+              "Pregnancies":preg, "Glucose":glu, "SkinThickness":skin,
+              "Insulin":ins, "BMI":bmi, "DPF":dpf, "Age":age,
+              "prob":round(p,3), "label":"At risk" if p>=thresh else "Not at risk"}
+    hist = (hist or []) + [record]
+    hist_df = pd.DataFrame(hist)
+
+    return (
+        gauge,
+        {"Risk probability": round(p, 3)},  # <-- float
+        badge,
+        consult,
+        hist,
+        gr.update(value=hist_df, visible=True)
+    )
+
+def retrain_from_csv(file, append_default):
+    global model, scaler, ACC, AUC, _base_df
+    if file is None: 
+        return "Chưa chọn CSV.", f"Accuracy ~ {ACC:.3f} | AUC ~ {AUC:.3f}"
+    df_u = pd.read_csv(file.name)
+    df_u.columns = [c.strip() for c in df_u.columns]
+    for c in IMPUTE_ZERO:
+        if c in df_u.columns:
+            df_u[c] = df_u[c].replace(0, np.nan).fillna(df_u[c].median())
+    df_all = pd.concat([_base_df, df_u], ignore_index=True) if append_default else df_u.copy()
+    X, y = split_xy(df_all, need_target=True)
+    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2,
+                                              random_state=SEED, stratify=y)
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_tr)
+    X_te = scaler.transform(X_te)
+    model = build_ann(len(FEATURES))
+    es = keras.callbacks.EarlyStopping(monitor='val_auc', mode='max',
+                                       patience=20, restore_best_weights=True, verbose=0)
+    model.fit(X_tr, y_tr, epochs=250, batch_size=32,
+              validation_split=0.2, callbacks=[es], verbose=0)
+    y_prob = model.predict(X_te, verbose=0).ravel()
+    ACC = accuracy_score(y_te, (y_prob >= 0.5).astype(int))
+    AUC = roc_auc_score(y_te, y_prob)
+    return "Retrain hoàn tất.", f"Accuracy ~ {ACC:.3f} | AUC ~ {AUC:.3f}"
+
+def batch_predict_csv(file, thresh):
+    if file is None:
+        return None, gr.update(visible=False), "Chưa chọn CSV."
+    df = pd.read_csv(file.name)
+    df.columns = [c.strip() for c in df.columns]
+    for c in IMPUTE_ZERO:
+        if c in df.columns:
+            df[c] = df[c].replace(0, np.nan).fillna(df[c].median())
+    X, _ = split_xy(df, need_target=False)
+    Xn = scaler.transform(X)
+    p = model.predict(Xn, verbose=0).ravel()
+    out = df.copy()
+    out["risk_probability"] = np.round(p, 3)
+    out["label"] = np.where(out["risk_probability"] >= thresh, "At risk", "Not at risk")
+    out_path = "/content/diabetes_predictions.csv"
+    out.to_csv(out_path, index=False)
+    return out_path, gr.update(visible=True, value=out.head(12)), "Đã tạo file dự đoán."
+
+def export_artifacts():
+    keras.models.save_model(model, "/content/diabetes_ann.h5")
+    joblib.dump(scaler, "/content/scaler.pkl")
+    return "/content/diabetes_ann.h5", "/content/scaler.pkl", "Đã lưu model & scaler."
+
+def download_history(hist):
+    if not hist: 
+        return None, "Chưa có lịch sử."
+    df = pd.DataFrame(hist)
+    path = "/content/prediction_history.csv"
+    df.to_csv(path, index=False)
+    return path, "Đã xuất lịch sử."
+
+def update_personalization(name, app_name, tagline, primary, accent, text, lang, default_thresh, logo_file):
+    CFG["user_name"] = name or CFG["user_name"]
+    CFG["app_name"]  = app_name or CFG["app_name"]
+    CFG["tagline"]   = tagline or CFG["tagline"]
+    CFG["primary"]   = primary or CFG["primary"]
+    CFG["accent"]    = accent or CFG["accent"]
+    CFG["text"]      = text or CFG["text"]
+    CFG["lang"]      = lang
+    CFG["threshold"] = float(default_thresh)
+    if logo_file is not None:
+        data = open(logo_file.name, "rb").read()
+        b64 = base64.b64encode(data).decode("utf-8")
+        CFG["logo_svg"] = f"<img src='data:image/png;base64,{b64}' style='width:96px;height:96px;border-radius:20px'/>"
+    elif CFG.get("logo_svg") is None:
+        CFG["logo_svg"] = built_in_logo_svg(CFG["primary"], CFG["accent"], CFG["text"])
+    save_config(CFG)
+    hdr = header_html(CFG, ACC, AUC)
+    return hdr, f"Đã lưu cá nhân hoá. Ngưỡng mặc định: {CFG['threshold']:.2f} · Ngôn ngữ: {CFG['lang']}"
+
+# ------------------ THEME & CSS ------------------
+CSS = """
+.gradio-container { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+.card { background:#fff; border-radius:16px; padding:16px; border:1px solid #eef1f5; box-shadow:0 8px 24px rgba(0,0,0,.06); }
+"""
+
+THEME = gr.themes.Soft(primary_hue="violet", secondary_hue="green").set(body_background_fill="#fafbff")
+
+# ------------------ BUILD UI ------------------
+with gr.Blocks(title="Diabetes ANN — Personalized UI", theme=THEME, css=CSS) as demo:
+    cfg_state  = gr.State(CFG)
+    hist_state = gr.State([])
+
+    header = gr.HTML(header_html(CFG, ACC, AUC))
+
+    with gr.Tab("🔮 Predict"):
+        with gr.Row():
+            with gr.Column(scale=1, min_width=380):
+                pregnancies = gr.Slider(0, 17, 3, step=1, label="Pregnancies")
+                glucose     = gr.Slider(50, 200, 120, step=1, label="Glucose")
+                skin        = gr.Slider(0, 100, 23, step=1, label="SkinThickness")
+                insulin     = gr.Slider(0, 900, 100, step=1, label="Insulin")
+                bmi         = gr.Slider(10.0, 70.0, 28.0, step=0.1, label="BMI")
+                dpf         = gr.Slider(0.05, 2.5, 0.47, step=0.01, label="Diabetes Pedigree Function")
+                age         = gr.Slider(18, 90, 35, step=1, label="Age")
+                thresh      = gr.Slider(0.10, 0.90, CFG["threshold"], step=0.01, label="Decision threshold")
+                btn_predict = gr.Button("Predict", variant="primary")
+            with gr.Column(scale=1, min_width=380):
+                gauge_html  = gr.HTML()
+                prob_label  = gr.Label(label="Risk probability", num_top_classes=1)
+                verdict     = gr.HTML()
+                consult_md  = gr.Markdown()
+        with gr.Accordion("Prediction history", open=False):
+            hist_df = gr.Dataframe(visible=False)
+            btn_hist = gr.Button("Export history CSV")
+            hist_file = gr.File()
+            hist_msg  = gr.Markdown()
+            btn_hist.click(download_history, inputs=[hist_state], outputs=[hist_file, hist_msg])
+
+        btn_predict.click(
+            predict_one,
+            inputs=[pregnancies, glucose, skin, insulin, bmi, dpf, age, thresh, hist_state],
+            outputs=[gauge_html, prob_label, verdict, consult_md, hist_state, hist_df]
+        )
+
+    with gr.Tab("📦 Batch Predict CSV"):
+        csv_pred = gr.File(label="CSV (7 FEATURES, không cần Outcome)", file_types=[".csv"])
+        thresh2  = gr.Slider(0.10, 0.90, CFG["threshold"], step=0.01, label="Decision threshold")
+        run_pred = gr.Button("Run batch prediction")
+        file_out = gr.File(label="Tải CSV kết quả", visible=False)
+        head_df  = gr.Dataframe(label="Xem nhanh 12 dòng đầu", visible=False)
+        msg2     = gr.Markdown()
+        run_pred.click(batch_predict_csv, inputs=[csv_pred, thresh2],
+                       outputs=[file_out, head_df, msg2])
+
+    with gr.Tab("🧪 Data & Retrain ANN"):
+        gr.Markdown("Upload CSV để huấn luyện lại (7 FEATURES + `Outcome`=0/1). Có thể **Append** với dataset mặc định.")
+        csv_train = gr.File(label="Training CSV", file_types=[".csv"])
+        append_ck = gr.Checkbox(value=True, label="Append với dataset mặc định")
+        run_train = gr.Button("Train / Retrain", variant="primary")
+        msg3      = gr.Markdown()
+        metrics   = gr.Markdown(f"Accuracy ~ {ACC:.3f} | AUC ~ {AUC:.3f}")
+        run_train.click(retrain_from_csv, inputs=[csv_train, append_ck], outputs=[msg3, metrics])
+
+    with gr.Tab("🎨 Personalization"):
+        with gr.Row():
+            with gr.Column(scale=1):
+                name_in   = gr.Textbox(value=CFG["user_name"], label="Tên hiển thị")
+                app_in    = gr.Textbox(value=CFG["app_name"], label="App name")
+                tag_in    = gr.Textbox(value=CFG["tagline"], label="Tagline")
+                primary   = gr.ColorPicker(value=CFG["primary"], label="Primary color")
+                accent    = gr.ColorPicker(value=CFG["accent"], label="Accent color")
+                textcol   = gr.ColorPicker(value=CFG["text"], label="Text color")
+                lang_dd   = gr.Dropdown(choices=["VI","EN"], value=CFG["lang"], label="Language")
+                th_in     = gr.Slider(0.10, 0.90, CFG["threshold"], step=0.01, label="Default threshold")
+                logo_up   = gr.File(label="Tải logo PNG/SVG (tuỳ chọn)", file_types=[".png",".svg"])
+                save_btn  = gr.Button("Lưu cá nhân hoá", variant="primary")
+            with gr.Column(scale=1):
+                preview = gr.HTML(header_html(CFG, ACC, AUC))
+                save_msg = gr.Markdown()
+        save_btn.click(update_personalization,
+                       inputs=[name_in, app_in, tag_in, primary, accent, textcol, lang_dd, th_in, logo_up],
+                       outputs=[header, save_msg])
+
+    with gr.Tab("💾 Export"):
+        save_model_btn = gr.Button("Export model & scaler")
+        f_model  = gr.File(label="diabetes_ann.h5", interactive=False)
+        f_scaler = gr.File(label="scaler.pkl", interactive=False)
+        save_msg2 = gr.Markdown()
+        save_model_btn.click(export_artifacts, outputs=[f_model, f_scaler, save_msg2])
+
+    gr.Markdown("---\n*Hướng dẫn nhanh:* Tab **Personalization** để tuỳ biến màu/threshold/ngôn ngữ & logo. "
+                "Tab **Batch Predict** để dự đoán file CSV hàng loạt. "
+                "Tab **Data & Retrain ANN** để huấn luyện lại trên dữ liệu của bạn.")
+
+demo.launch()
